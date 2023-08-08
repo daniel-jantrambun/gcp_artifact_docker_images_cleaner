@@ -1,0 +1,85 @@
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: artifact-registry-cleaner
+  namespace: artifact-registry-cleaner
+  annotations:
+    version: "ad8a61a"
+    buildOn: "2023-08-08 09:48:39"
+spec:
+  schedule: "0 12 * * *"
+  successfulJobsHistoryLimit: 1
+  startingDeadlineSeconds: 100
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          annotations:
+            sidecar.istio.io/inject: "false"
+        spec:
+          volumes:
+            - name: googlekey
+              secret:
+                secretName: artifact-registry-cleaner-service-account
+          serviceAccountName: artifact-registry-cleaner-sa
+          securityContext:
+            runAsUser: 1000
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: cloud.google.com/gke-preemptible
+                        operator: Exists
+          containers:
+            - name: artifact-registry-cleaner
+              image: <YOUR GCP ARTIFACT REGISTRY>/gcp-artifact-docker-images-cleaner:ad8a61a
+              imagePullPolicy: Always
+              volumeMounts:
+                - name: googlekey
+                  mountPath: "/var/run/secret/cloud.google.com"
+                  readOnly: true
+              securityContext:
+                allowPrivilegeEscalation: false
+                runAsUser: 1000
+              resources:
+                requests:
+                  memory: "10Mi"
+                  cpu: "5m"
+                limits:
+                  memory: "256Mi"
+                  cpu: "500m"
+              env:
+                - name: PROJECT
+                  valueFrom:
+                    configMapKeyRef:
+                      name: artifact-registry-cleaner
+                      key: PROJECT
+                - name: REPOSITORY
+                  valueFrom:
+                    configMapKeyRef:
+                      name: artifact-registry-cleaner
+                      key: REPOSITORY
+                - name: LOCATION
+                  valueFrom:
+                    configMapKeyRef:
+                      name: artifact-registry-cleaner
+                      key: LOCATION
+                - name: DAYS_TO_KEEP
+                  valueFrom:
+                    configMapKeyRef:
+                      name: artifact-registry-cleaner
+                      key: DAYS_TO_KEEP
+                - name: DRY
+                  valueFrom:
+                    configMapKeyRef:
+                      name: artifact-registry-cleaner
+                      key: DRY
+                - name: GOOGLE_APPLICATION_CREDENTIALS
+                  valueFrom:
+                    configMapKeyRef:
+                      name: artifact-registry-cleaner
+                      key: GOOGLE_APPLICATION_CREDENTIALS
+          restartPolicy: OnFailure

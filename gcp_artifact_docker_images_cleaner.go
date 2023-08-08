@@ -2,49 +2,58 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
-    "sync"
+
+	"github.com/peterbourgon/ff/v3"
+	log "github.com/sirupsen/logrus"
 
 	"cloud.google.com/go/artifactregistry/apiv1"
 	"cloud.google.com/go/artifactregistry/apiv1/artifactregistrypb"
 	"google.golang.org/api/iterator"
 )
 
-var (
-	project      = flag.String("project", "", "GCP project id")
-	location     = flag.String("location", "europe-west4", "artifact registry location")
-	repository   = flag.String("repository", "", "repository name")
-	nbDaysToKeep = flag.Int("daysToKeep", 30, "nb days to keep docker images")
-	dry          = flag.Bool("dry", false, "dry run")
-)
-
 func main() {
-	fmt.Println("start artifact registry management")
-	err := initVariables()
-	if err != nil {
-		fmt.Printf("error getting args: %v\n", err)
+	log.SetFormatter(&log.JSONFormatter{})
+	log.Info("start artifact registry management")
+	fs := flag.NewFlagSet("gcp_artifact_docker_images_cleaner", flag.ContinueOnError)
+	var (
+		project      = fs.String("project", "unique-functions", "GCP project id (env PROJECT)")
+		location     = fs.String("location", "europe-west4", "artifact registry location (env LOCATION)")
+		repository   = fs.String("repository", "", "repository name")
+		nbDaysToKeep = fs.Int("days-to-keep", 60, "nb days to keep docker images")
+		dry          = fs.Bool("dry", false, "dry run")
+		concurrency  = fs.Int("concurrency", 5, "concurrency")
+	)
+	if err := ff.Parse(fs, os.Args[1:], ff.WithEnvVars()); err != nil {
+		log.Errorf("error: %v\n", err)
 		os.Exit(1)
 	}
+	log.Printf("project: %s\n", *project)
+	log.Infof("location: %s\n", *location)
+	log.Infof("repository: %s\n", *repository)
+	log.Infof("nbDaysToKeep: %d\n", *nbDaysToKeep)
+	log.Infof("dry: %t\n", *dry)
+	log.Infof("concurrency: %d\n", *concurrency)
 
 	ctx := context.Background()
 	c, err := artifactregistry.NewClient(ctx)
 	if err != nil {
-		fmt.Printf("error creating artifact registry client: %v\n", err)
+		log.Errorf("error creating artifact registry client: %v\n", err)
 		os.Exit(1)
 	}
 	defer c.Close()
 
 	referenceDate := time.Now().AddDate(0, 0, -(int(*nbDaysToKeep)))
-	fmt.Printf("will delete docker images older than %s or without tag\n", referenceDate)
+	log.Infof("will delete docker images older than %s or without tag\n", referenceDate)
 
 	req := &artifactregistrypb.ListDockerImagesRequest{
-		Parent:   fmt.Sprintf("projects/%s/locations/%s/repositories/%s", *project, *location, *repository),
-		OrderBy:  "build_time desc",
+		Parent:  fmt.Sprintf("projects/%s/locations/%s/repositories/%s", *project, *location, *repository),
+		OrderBy: "build_time desc",
 	}
 	it := c.ListDockerImages(ctx, req)
 
@@ -57,11 +66,11 @@ func main() {
 			break
 		}
 		if err != nil {
-			fmt.Printf("error iterating over docker images: %v\n", err)
+			log.Errorf("error iterating over docker images: %v\n", err)
 			os.Exit(1)
 		}
 		toDelete := false
-		
+
 		if len(resp.Tags) == 0 {
 			toDelete = true
 		} else {
@@ -82,9 +91,10 @@ func main() {
 			packageName := imageName[0]
 			version := imageName[1]
 
+			log.Infof("Image will be deleted: %s/%s\n", packageName, version)
 			versionName := fmt.Sprintf("projects/%s/locations/%s/repositories/%s/packages/%s/versions/%s", *project, *location, *repository, packageName, version)
 			for _, tag := range resp.Tags {
-				fmt.Printf("tag: %s\n", tag)
+				log.Infof("Tag to be deleted for this image: %s\n", tag)
 				tagName := fmt.Sprintf("projects/%s/locations/%s/repositories/%s/packages/%s/tags/%s", *project, *location, *repository, packageName, tag)
 				tagsToDelete = append(tagsToDelete, tagName)
 			}
@@ -94,11 +104,13 @@ func main() {
 	}
 
 	if !*dry {
-		fmt.Println("will delete tags and images")
+		log.Info("will delete tags and images")
 		var wg sync.WaitGroup
-		fmt.Printf("will delete %d docker tags\n", len(tagsToDelete))
-		number := 5
-		if len(tagsToDelete) < 5 {number = len(tagsToDelete)}
+		log.Infof("will delete %d docker tags\n", len(tagsToDelete))
+		number := *concurrency
+		if len(tagsToDelete) < number {
+			number = len(tagsToDelete)
+		}
 		for i := 0; i < number; i++ {
 			wg.Add(1)
 			go func(j int) {
@@ -108,10 +120,12 @@ func main() {
 		}
 		wg.Wait()
 
-		fmt.Printf("will delete %d docker images\n", len(imagesToDelete))
-		number = 5
-		if len(imagesToDelete) < 5 {number = len(imagesToDelete)}
-		for i := 0; i < number ; i++ {
+		log.Infof("will delete %d docker images\n", len(imagesToDelete))
+		number = *concurrency
+		if len(imagesToDelete) < *concurrency {
+			number = len(imagesToDelete)
+		}
+		for i := 0; i < number; i++ {
 			wg.Add(1)
 			go func(j int) {
 				defer wg.Done()
@@ -119,52 +133,46 @@ func main() {
 			}(i)
 		}
 		wg.Wait()
+	} else {
+		log.Info("dry run, will not delete anything")
 	}
 
-	fmt.Println("end artifact registry management")
+	log.Info("end artifact registry management")
 }
 
 func deleteTags(ctx context.Context, c *artifactregistry.Client, tagsToDelete []string, i int) error {
-	// fmt.Printf("start deleting %d tags for group %d\n", len(tagsToDelete), i)
+	log.Infof("start deleting %d tags for group %d\n", len(tagsToDelete), i)
 	for _, tagName := range tagsToDelete {
-		// fmt.Printf("tag name: %s\n", tagName)
+		// log.Infof("tag name: %s\n", tagName)
 		req := &artifactregistrypb.DeleteTagRequest{
 			Name: tagName,
 		}
 		err := c.DeleteTag(ctx, req)
 		if err != nil {
-			fmt.Printf("error deleting docker image tag: %v\n", err)
+			log.Errorf("error deleting docker image tag: %v\n", err)
 		}
-		// fmt.Println("tag deleted")
+		// log.Info("tag deleted")
 	}
 
-	// fmt.Printf("end tags deleting for group %d\n", i)
+	log.Infof("end tags deleting for group %d\n", i)
 	return nil
 }
 
 func deleteImages(ctx context.Context, c *artifactregistry.Client, imagesToDelete []string, i int) error {
-	// fmt.Printf("start deleting %d images for group %d\n", len(imagesToDelete), i)
+	log.Infof("start deleting %d images for group %d\n", len(imagesToDelete), i)
 	for _, imageName := range imagesToDelete {
 		req := &artifactregistrypb.DeleteVersionRequest{
 			Name: imageName,
 		}
 		op, err := c.DeleteVersion(ctx, req)
 		if err != nil {
-			fmt.Printf("error deleting docker image: %v\n", err)
+			log.Infof("error deleting docker image: %v\n", err)
 		}
 		err = op.Wait(ctx)
 		if err != nil {
-			fmt.Printf("error waiting for delete docker image operation: %v\n", err)
+			log.Errorf("error waiting for delete docker image operation: %v\n", err)
 		}
 	}
-	fmt.Printf("end images deleting for group %d\n", i)
-	return nil
-}
-
-func initVariables() error {
-	flag.Parse()
-	if *repository == "" {
-		return errors.New("repository has no value")
-	}
+	log.Infof("end images deleting for group %d\n", i)
 	return nil
 }

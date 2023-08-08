@@ -1,0 +1,7 @@
+---
+kind: Namespace
+apiVersion: v1
+metadata:
+  name: artifact-registry-cleaner
+  labels:
+    name: artifact-registry-cleaner

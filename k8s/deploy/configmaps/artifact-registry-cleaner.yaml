@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: artifact-registry-cleaner
+data:
+  GOOGLE_APPLICATION_CREDENTIALS: "/var/run/secret/cloud.google.com/artifact-registry-cleaner.json"
+  PROJECT: <YOUR GCP PROJECT_ID>
+  LOCATION: <YOUR GCP PROJECT LOCATION>
+  REPOSITORY: <YOUR REPOSITORY TO BE CLEANED>
+  DAYS_TO_KEEP: "50"
+  DRY: "0"
+
